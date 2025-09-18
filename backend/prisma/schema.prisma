@@ -1,0 +1,314 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model projects {
+  id                   String          @id
+  name                 String
+  description          String?
+  userId               String
+  createdAt            DateTime        @default(now())
+  updatedAt            DateTime
+  dbName               String?
+  dbHost               String?
+  dbUser               String?
+  dbPassword           String?
+  repoUrl              String?
+  branch               String          @default("main")
+  tokensUsed           Int             @default(0)
+  githubRepoId         String?
+  githubRepoName       String?
+  githubInstallationId String?
+  githubPrivate        Boolean         @default(false)
+  
+  // Essential Deployment Fields
+  isDeployed           Boolean         @default(false)
+  deploymentUrl        String?         // Live production URL (e.g., https://myapp.forma.dev)
+  subdomain            String?         @unique // Unique subdomain under forma.dev
+  deploymentStatus     String          @default("not_deployed") // not_deployed, building, deployed, failed
+  railwayServiceId     String?         // Railway service ID for management
+  lastDeployedAt       DateTime?
+  
+  conversations        conversations[]
+  files                projectFiles[]
+  users                users           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  pull_requests        pull_requests[]
+  deployments          deployments[]
+  deployment_usage     deployment_usage[]
+  
+  @@index([subdomain])
+  @@index([deploymentStatus])
+  @@index([isDeployed])
+}
+
+// Minimal deployment history tracking
+model deployments {
+  id                String   @id @default(cuid())
+  projectId         String
+  status            String   // building, success, failed, cancelled
+  railwayServiceId  String?  // Railway service ID
+  deploymentUrl     String?  // Final deployment URL
+  subdomain         String?  // Subdomain used
+  
+  // Basic metadata
+  triggeredBy       String   // user_manual, auto_deploy
+  buildTime         Int?     // Build time in seconds
+  errorMessage      String?  // Error details if failed
+  
+  createdAt         DateTime @default(now())
+  
+  project           projects @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  deployment_usage  deployment_usage[]
+  
+  @@index([projectId])
+  @@index([status])
+  @@index([createdAt])
+}
+
+// Track deployment costs and usage
+model deployment_usage {
+  id            String   @id @default(cuid())
+  projectId     String
+  userId        String
+  deploymentId  String?
+  
+  // Simple cost tracking
+  monthlyCost   Float    @default(5.0)  // Monthly hosting cost (Railway starter: ~$5)
+  billingMonth  String   // YYYY-MM format
+  isActive      Boolean  @default(true) // Is deployment currently active
+  
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+  
+  project       projects @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  user          users    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  deployment    deployments? @relation(fields: [deploymentId], references: [id], onDelete: SetNull)
+  
+  @@unique([projectId, billingMonth]) // One record per project per month
+  @@index([projectId])
+  @@index([userId])
+  @@index([billingMonth])
+  @@index([isActive])
+}
+
+model pull_requests {
+  id          String   @id
+  projectId   String
+  title       String
+  description String?
+  status      String   @default("draft")
+  prNumber    Int?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime
+  projects    projects @relation(fields: [projectId], references: [id], onDelete: Cascade)
+}
+
+model usage_records {
+  id        String   @id
+  userId    String
+  tokens    Int
+  model     String
+  cost      Float
+  createdAt DateTime @default(now())
+  users     users    @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+model users {
+  id                   String          @id @default(cuid())
+  email                String          @unique
+  password             String
+  firstName            String?
+  lastName             String?
+  createdAt            DateTime        @default(now())
+  updatedAt            DateTime        @updatedAt
+  plan                 String          @default("free")
+  isVerified          Boolean         @default(false)
+  verificationCode    String?
+  verificationExpires DateTime?
+  resetCode           String?         // Password reset code
+  resetCodeExpires    DateTime?       // Reset code expiration
+  
+  // Token tracking (daily/monthly)
+  dailyTokensRemaining    Int      @default(200000) // 200K daily tokens for free plan
+  dailyTokensResetAt      DateTime?
+  monthlyTokensRemaining  Int      @default(1000000) // 1M monthly tokens for free plan
+  monthlyTokensResetAt    DateTime?
+
+  // Legacy fields (will be deprecated)
+  tokensUsed             Int      @default(0)
+  tokensLimit            Int      @default(1000000)
+
+  // NEW DUAL TOKEN SYSTEM
+  // Subscription tokens (reset by Stripe webhooks on billing cycles)
+  subscriptionTokens         Int       @default(0)    // Available subscription tokens (decrements on use)
+  
+  // Purchased tokens (rollover allowed, never expire)
+  purchasedTokens            Int       @default(0)    // Available purchased tokens (decrements on use)
+  
+  stripeCustomerId     String?
+  role                 String          @default("user")
+  githubId             String?         @unique
+  githubUsername       String?
+  githubAccessToken    String?
+  githubRefreshToken   String?
+  githubTokenExpiresAt DateTime?
+  autoTopUpEnabled     Boolean         @default(false)
+  autoTopUpThreshold   Int             @default(10000)
+  autoTopUpAmount      Int             @default(15000000)
+  
+  // Subscription tracking fields
+  stripeSubscriptionId String?         // Stripe subscription ID
+  subscriptionStatus   String?         // active, canceled, past_due, etc.
+  subscriptionEndDate  DateTime?       // When current period ends
+  
+  // Deployment limits
+  maxDeployments       Int             @default(1)    // Max concurrent deployments based on plan
+  
+  conversations        conversations[]
+  projects             projects[]
+  usage_records        usage_records[]
+  purchases            purchases[]
+  deployment_usage     deployment_usage[]
+  email_notifications  email_notifications[]
+
+  @@index([role])
+}
+
+model projectFiles {
+  id          String   @id @default(cuid())
+  projectId   String
+  path        String
+  r2Key       String?
+  contentType String
+  size        Int
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  content     String?
+  status      String   @default("PENDING_UPLOAD")
+  metadata    String?  // JSON string for storing file metadata like altText, dimensions, etc.
+  project     projects @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@unique([projectId, path])
+  @@index([r2Key])
+  @@index([status])
+}
+
+model conversations {
+  id        String     @id @default(uuid())
+  userId    String
+  projectId String?
+  title     String?
+  createdAt DateTime   @default(now())
+  updatedAt DateTime   @updatedAt
+  project   projects?  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  user      users      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  messages  messages[]
+
+  @@index([userId])
+  @@index([projectId])
+}
+
+model messages {
+  id             String        @id @default(uuid())
+  conversationId String
+  role           String
+  content        String
+  metadata       Json?
+  createdAt      DateTime      @default(now())
+  conversation   conversations @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+
+  @@index([conversationId])
+  @@index([createdAt])
+}
+
+model purchases {
+  id                String   @id @default(cuid())
+  userId            String
+  type              String   // 'subscription' | 'tokens' | 'credits' | 'deployment'
+  amount            Float    // Amount in USD
+  currency          String   @default("usd")
+  tokens            Int?     // Number of tokens purchased (for token purchases)
+  description       String   // Description of the purchase
+  status            String   @default("completed") // 'pending' | 'completed' | 'failed' | 'refunded'
+  stripePaymentIntentId String? // Stripe Payment Intent ID
+  stripeInvoiceId   String?  // Stripe Invoice ID (for subscriptions)
+  metadata          Json?    // Additional metadata
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+  users             users    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([type])
+  @@index([status])
+  @@index([createdAt])
+}
+
+// Contact form submissions
+model contact_submissions {
+  id        String   @id @default(cuid())
+  name      String
+  email     String
+  reason    String
+  message   String   @db.Text
+  ipAddress String?
+  userAgent String?  @db.Text
+  status    String   @default("new") // new, in_progress, resolved, closed
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  
+  @@index([status])
+  @@index([reason])
+  @@index([createdAt])
+}
+
+// Email notification system tables
+model email_templates {
+  id          String   @id @default(cuid())
+  name        String   @unique // e.g., 'welcome', 'subscription_created', 'payment_failed'
+  subject     String
+  htmlContent String   @db.Text
+  textContent String?  @db.Text
+  variables   Json?    // JSON array of variable names that can be used in template
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  
+  // Relations
+  email_notifications email_notifications[]
+  
+  @@index([name])
+  @@index([isActive])
+}
+
+model email_notifications {
+  id           String   @id @default(cuid())
+  templateId   String
+  recipientId  String?  // User ID if applicable
+  toEmail      String
+  toName       String?
+  subject      String
+  htmlContent  String   @db.Text
+  textContent  String?  @db.Text
+  status       String   @default("pending") // pending, sent, failed
+  sentAt       DateTime?
+  failedAt     DateTime?
+  errorMessage String?  @db.Text
+  metadata     Json?    // Additional data like tracking info, campaign data, etc.
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+  
+  // Relations
+  template     email_templates @relation(fields: [templateId], references: [id])
+  recipient    users?          @relation(fields: [recipientId], references: [id], onDelete: SetNull)
+  
+  @@index([status])
+  @@index([recipientId])
+  @@index([templateId])
+  @@index([createdAt])
+}
